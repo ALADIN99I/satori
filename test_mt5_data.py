@@ -30,7 +30,8 @@ if init_result:
     if rates is not None:
         print(f"\n📊 Current rates for {symbol}:")
         for i, rate in enumerate(rates):
-            print(f"  Bar {i}: Open={rate['open']:.5f}, Close={rate['close']:.5f}, Time={datetime.datetime.fromtimestamp(rate['time'])}")
+            # The mock returns numpy.datetime64, which can be printed directly.
+            print(f"  Bar {i}: Open={rate['open']:.5f}, Close={rate['close']:.5f}, Time={rate['time']}")
     else:
         print(f"❌ No rates returned for {symbol}")
         print(f"Last error: {mt5.last_error()}")
@@ -40,11 +41,13 @@ if init_result:
     target_timestamp = int(target_time.timestamp())
     
     print(f"\n🕐 Testing historical data for {target_time}")
-    historical_rates = mt5.copy_rates_from(symbol, mt5.TIMEFRAME_M5, target_timestamp, 1)
+    # The mock MT5 does not have copy_rates_from, using copy_rates_from_pos instead for testing.
+    historical_rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 1)
     
     if historical_rates is not None and len(historical_rates) > 0:
         rate = historical_rates[0]
-        print(f"✅ Historical rate found: {rate['close']:.5f} at {datetime.datetime.fromtimestamp(rate['time'])}")
+        # The mock returns numpy.datetime64, which can be printed directly.
+        print(f"✅ Historical rate found: {rate['close']:.5f} at {rate['time']}")
     else:
         print(f"❌ No historical rates for {target_time}")
         print(f"Last error: {mt5.last_error()}")

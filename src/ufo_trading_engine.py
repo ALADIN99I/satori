@@ -98,33 +98,62 @@ class UFOTradingEngine:
         should_trade, _ = self.should_trade_now()
         return should_trade
     
-    def should_close_for_session_end(self):
+    def should_close_for_session_end(self, economic_events=None):
         """
-        Determines if positions should be closed due to session ending
-        Implements "not to go to bed with positions open" rule
+        Determines if positions should be closed due to session ending.
+        Uses live time and economic calendar data, simulator-style.
         """
         now_utc = datetime.utcnow().replace(tzinfo=pytz.UTC)
         london_time = now_utc.astimezone(self.session_timezone)
-        current_time = london_time.time()
+        current_time_london = london_time.time()
         current_weekday = london_time.weekday()
         
+        # Use GMT for time-based rules
+        current_time_gmt = now_utc.time()
+
         # Close before weekend
-        if current_weekday == 4 and current_time >= time(21, 0):  # Friday 9 PM
+        if current_weekday == 4 and current_time_london >= time(21, 0):  # Friday 9 PM London
             return True, "Weekend closure - Friday evening"
             
         # Close at 8 PM GMT (20:00) - UFO methodology end of analysis period
-        if current_time >= time(20, 0):
+        if current_time_gmt >= time(20, 0):
             return True, "End of UFO analysis period (8 PM GMT)"
             
-        # Close during major news times (can be expanded)
-        major_news_times = [
-            (time(8, 30), time(9, 30)),   # London open + ECB times
-            (time(13, 30), time(14, 30)), # NY open + Fed times
-        ]
-        
-        for start_time, end_time in major_news_times:
-            if start_time <= current_time <= end_time:
-                return True, f"Major news period: {current_time}"
+        # Use actual economic calendar data if provided
+        if economic_events is not None and not economic_events.empty:
+            # Ensure 'gmt_hour' and 'gmt_minute' columns exist
+            if 'gmt_hour' not in economic_events.columns or 'gmt_minute' not in economic_events.columns:
+                 # Attempt to create them if 'datetime' column exists
+                if 'datetime' in economic_events.columns:
+                    try:
+                        gmt_time = pd.to_datetime(economic_events['datetime'], utc=True).dt.tz_convert('GMT')
+                        economic_events['gmt_hour'] = gmt_time.dt.hour
+                        economic_events['gmt_minute'] = gmt_time.dt.minute
+                    except Exception as e:
+                        print(f"⚠️ Could not process economic events time: {e}")
+                        return False, "Normal trading hours (event processing failed)"
+                else:
+                    return False, "Normal trading hours (no time in events)"
+
+            # Check for high-impact events in the next 30-60 minutes
+            now_gmt = now_utc
+            time_horizon = now_gmt + pd.Timedelta(minutes=60)
+
+            high_impact_events = economic_events[
+                (economic_events['impact'] == 'High') &
+                (economic_events.apply(
+                    lambda row: now_gmt.time() <= time(row['gmt_hour'], row['gmt_minute']) < time_horizon.time(),
+                    axis=1
+                ))
+            ]
+
+            if not high_impact_events.empty:
+                event_details = []
+                for _, event in high_impact_events.iterrows():
+                    event_time_str = f"{event['gmt_hour']:02d}:{event['gmt_minute']:02d}"
+                    event_details.append(f"{event_time_str} GMT: {event['country']} {event['title']}")
+
+                return True, f"High-impact economic events approaching: {'; '.join(event_details)}"
                 
         return False, "Normal trading hours"
     
