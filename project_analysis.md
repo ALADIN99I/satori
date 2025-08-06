@@ -112,3 +112,54 @@ The project has a multi-layered approach to risk management:
 The UFO Forex Trading Bot is a well-engineered and innovative project. It combines a unique quantitative trading strategy with the power of LLMs to create a sophisticated automated trading system. The project is well-structured, has a strong focus on risk management, and includes a comprehensive simulation framework for backtesting.
 
 While there are some areas for improvement, the project represents a solid foundation for a powerful and profitable trading bot.
+
+## 8. Data Flow Analysis: From Root to Fruit
+
+This section provides a step-by-step trace of the data and decision-making flow within the trading bot for a single trading cycle. This demonstrates the end-to-end dependency chain, from the project's "root" to its final "fruit."
+
+### Step 1: The Root - Initiation
+
+1.  **`main.py`**: The process starts. It reads the `config/config.ini` file.
+2.  **`LiveTrader` Instantiation**: An instance of `LiveTrader` is created, passing the configuration.
+3.  **Component Initialization**: `LiveTrader`'s `__init__` method initializes all necessary components: `MT5DataCollector`, `UFOTradingEngine`, `UfoCalculator`, all agents, etc. Each component is now ready to perform its function.
+
+### Step 2: The Stem - The Trading Cycle Begins
+
+1.  **`LiveTrader.run()`**: The main `while True:` loop begins.
+2.  **Session Check**: The `UFOTradingEngine.is_active_session()` method is called. If it's not a valid trading time (e.g., weekend, outside of London/NY sessions), the loop pauses.
+
+### Step 3: The Branches - Data Collection and Analysis
+
+1.  **Price Data Collection**:
+    -   `LiveTrader` calls `DataAnalystAgent.execute()`.
+    -   `DataAnalystAgent` uses `MT5DataCollector` to fetch raw price data (OHLC) for multiple timeframes from the MetaTrader 5 terminal.
+2.  **UFO Calculation (The Leaves)**:
+    -   The raw price data is passed to the `UfoCalculator`.
+    -   `calculate_percentage_variation()`: Calculates the percentage change for each bar.
+    -   `calculate_incremental_sum()`: Calculates the cumulative sum of variations.
+    -   `generate_ufo_data()`: This is the core calculation. It synthesizes the incremental sums for each currency (e.g., EUR, USD) to create a "currency strength" score. This is done for each timeframe, resulting in a dictionary of UFO data.
+3.  **Market State Analysis**:
+    -   The `UfoCalculator` further analyzes the UFO data to `detect_oscillations`, `analyze_market_uncertainty`, and `detect_timeframe_coherence`. This enriches the raw UFO scores with context about the market's character.
+
+### Step 4: The Branches - Portfolio Management (Existing Positions)
+
+1.  **Get Open Positions**: `LiveTrader` calls `RiskManagerAgent.portfolio_manager.get_positions()` to get a list of all currently open trades.
+2.  **Portfolio Stop-Loss Check**: `UFOTradingEngine.check_portfolio_equity_stop()` is called. If the total portfolio drawdown exceeds the configured limit (e.g., -7%), the system triggers an emergency exit, closing all open positions via the `TradeExecutor`.
+3.  **Reinforcement Logic**: For each open position, `UFOTradingEngine.should_reinforce_position()` is called. It uses the latest UFO data to check if the original trade thesis is still valid. If a position is in loss but the thesis holds, it may recommend a "compensation trade" to add to the position at a better price.
+
+### Step 5: The Branches - Agentic Workflow (New Positions)
+
+1.  **Economic Events**: `DataAnalystAgent` is called again to fetch upcoming economic events.
+2.  **Market Research**: `MarketResearcherAgent.execute()` is called. It takes the UFO data and economic events as input and uses an LLM to generate a high-level "consensus" or market view.
+3.  **Trade Idea Generation**: `TraderAgent.execute()` receives the consensus and the list of open positions. It uses an LLM to generate specific, actionable trade ideas (e.g., "BUY EURUSD", "SELL GBPJPY") in a JSON format, while considering the need for diversification.
+4.  **Risk Assessment**: `RiskManagerAgent.execute()` takes the proposed trade ideas and performs a risk analysis, considering factors like portfolio exposure and predictive risk models.
+5.  **Final Authorization**: `FundManagerAgent.execute()` acts as the final gatekeeper. It reviews the trade ideas and the risk assessment and gives a final "APPROVE" or "REJECT" decision.
+
+### Step 6: The Fruit - Trade Execution
+
+1.  **Authorization Check**: `LiveTrader` checks if the final authorization is "APPROVE".
+2.  **Final UFO Engine Check**: `UFOTradingEngine.should_open_new_trades()` performs a final check based on diversification rules and portfolio health.
+3.  **Risk Scaling**: The bot calculates a `risk_scale_factor` to ensure the total risk of the new trades does not exceed a predefined portfolio limit (e.g., 4.5%). Lot sizes are adjusted accordingly.
+4.  **Execute Trades**: For each approved and scaled trade, `TradeExecutor.execute_ufo_trade()` is called. This sends the final order (e.g., `ORDER_TYPE_BUY` for EURUSD at 0.05 lots) to the MetaTrader 5 terminal.
+5.  **Logging**: The results of the trade execution (success or failure) are logged to the console.
+6.  **Wait**: The `LiveTrader` loop pauses for the configured `cycle_period_minutes` before starting the entire process again.
