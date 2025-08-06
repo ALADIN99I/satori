@@ -86,3 +86,32 @@ This document outlines the key architectural and functional differences between 
 | **Trading Engine**      | `SimulationUFOTradingEngine` (uses simulated time)       | `UFOTradingEngine` (uses real time)                    |
 | **Portfolio**           | Simulated, in-memory object                              | Real MT5 trading account                               |
 | **Economic Calendar**   | Historical data for the simulation date                  | Current and upcoming events                            |
+| **Risk Management**     | Fixed trade volumes; simulated SL/TP rules               | Automatic risk-based volume scaling; portfolio-level stops |
+
+## 8. Detailed Functional Differences
+
+This section covers more granular differences in how specific functionalities are implemented.
+
+- **P&L Calculation:**
+  - **Simulator:** Implements its own P&L logic (`update_portfolio_value`) with a custom pip value multiplier (`get_pip_value_multiplier`) to handle different asset types (e.g., JPY pairs). P&L is an in-memory calculation.
+  - **Real System:** Relies entirely on the broker for P&L information. It fetches the current P&L of open positions directly from the MT5 terminal.
+
+- **Trade Closing Logic:**
+  - **Simulator:** Uses a set of hard-coded rules to determine when to close a simulated position. This includes fixed P&L targets (e.g., take profit at +$75, stop loss at -$50), time-based exits (e.g., close after 4 hours), and a simulated trailing stop.
+  - **Real System:** Adheres to the UFO methodology, where trades are not closed by individual stop-losses but by portfolio-level decisions. The `UFOTradingEngine` determines when to close all positions based on conditions like the end of a trading session or a breach of the total portfolio equity stop.
+
+- **Position Management (Reinforcement vs. Compensation):**
+  - **Simulator:** Actively uses a `DynamicReinforcementEngine` and a "reinforcement" strategy (`simulate_realistic_position_tracking`) to add to existing positions based on certain criteria during the simulation.
+  - **Real System:** Implements a "compensation" strategy managed by the `UFOTradingEngine` (`execute_compensation_trade`). Although the `DynamicReinforcementEngine` is initialized, it is **not actively used** in the main trading loop. The live system relies on the `UFOTradingEngine`'s core logic for managing trades.
+
+- **Risk Scaling and Volume Sizing:**
+  - **Simulator:** Executes trades using the exact lot size (`volume`) proposed by the `TraderAgent` (LLM). It does not perform any additional risk analysis on the proposed volume.
+  - **Real System:** Implements a critical **automatic risk scaling feature**. Before execution, it calculates the total potential risk of all proposed trades. If the risk exceeds a predefined portfolio limit (e.g., 4.5%), it scales down the volume of all new trades proportionally to stay within the safety limit.
+
+- **Currency Pair Handling:**
+  - **Simulator:** Contains a robust `validate_and_correct_currency_pair` function that cleans and corrects common formatting issues from the LLM, such as inverted pairs (e.g., correcting `CADUSD` to `USDCAD`).
+  - **Real System:** Lacks this validation logic. It assumes the pair provided by the LLM is correctly formatted and simply appends the necessary broker suffix. This could be a point of failure if the LLM provides an invalid pair.
+
+- **Data Collection Strategy:**
+  - **Simulator:** Collects historical data for **all symbols** listed in the configuration file during each cycle.
+  - **Real System:** Collects live market data for only a **single `base_symbol`** (e.g., `EURUSD`) to perform its UFO analysis. This represents a significant strategic difference in how the market state is evaluated.
