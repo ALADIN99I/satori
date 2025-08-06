@@ -305,273 +305,233 @@ class LiveTrader:
             print(f"❌ Error during dynamic reinforcement: {e}")
 
 
+    def _run_continuous_monitoring(self, ufo_data):
+        """
+        Runs the faster, inner loop for continuous monitoring tasks.
+        This includes managing open positions and dynamic reinforcement.
+        """
+        print("\n--- Continuous Monitoring ---")
+        self._manage_open_positions_simulator_style()
+        self._perform_dynamic_reinforcement(ufo_data)
+        print("--- End Continuous Monitoring ---\n")
+
+    def _run_main_trading_cycle(self):
+        """
+        Runs the main, slower trading cycle for analysis and new trade decisions.
+        """
+        print("\n" + "="*60)
+        print(f"🚀 STARTING NEW TRADING CYCLE - {pd.Timestamp.now()} 🚀")
+        print("="*60)
+
+        # 1. Data Collection (Simulator Style: All Symbols)
+        print("📊 PHASE 1: Data Collection (Simulator Style)")
+        symbols = self.config['trading']['symbols'].split(',')
+        symbol_suffix = self.config['mt5'].get('symbol_suffix', '')
+        all_price_data = {}
+        timeframes = [mt5.TIMEFRAME_M5, mt5.TIMEFRAME_M15, mt5.TIMEFRAME_H1, mt5.TIMEFRAME_H4, mt5.TIMEFRAME_D1]
+        timeframe_bars = {
+            mt5.TIMEFRAME_M5: 240, mt5.TIMEFRAME_M15: 80, mt5.TIMEFRAME_H1: 20,
+            mt5.TIMEFRAME_H4: 120, mt5.TIMEFRAME_D1: 100
+        }
+
+        for symbol in symbols:
+            symbol_with_suffix = symbol + symbol_suffix
+            data = self.agents['data_analyst'].execute({
+                'source': 'mt5', 'symbol': symbol_with_suffix,
+                'timeframes': timeframes, 'num_bars': timeframe_bars
+            })
+            if data:
+                all_price_data[symbol] = data
+
+        if not all_price_data:
+            print("Could not fetch any price data for the main cycle.")
+            return None # Return None to indicate failure
+        print(f"✅ Collected data for {len(all_price_data)} symbols")
+
+        # 2. UFO Calculation (Simulator Style: Reshaped Data)
+        print("🛸 PHASE 2: UFO Analysis (Simulator Style)")
+        reshaped_data = {}
+        for symbol, timeframe_data in all_price_data.items():
+            for timeframe, df in timeframe_data.items():
+                if timeframe not in reshaped_data:
+                    reshaped_data[timeframe] = pd.DataFrame()
+                reshaped_data[timeframe][symbol] = df['close']
+
+        incremental_sums_dict = {}
+        for timeframe, price_df in reshaped_data.items():
+            variation_data = self.ufo_calculator.calculate_percentage_variation(price_df)
+            incremental_sums_dict[timeframe] = self.ufo_calculator.calculate_incremental_sum(variation_data)
+
+        ufo_data = self.ufo_calculator.generate_ufo_data(incremental_sums_dict)
+        print("✅ UFO analysis completed.")
+
+        # 3. Agentic Workflow for new trade decisions
+        print("🤖 PHASE 3: Agentic Workflow")
+        economic_events = self.agents['data_analyst'].execute({'source': 'economic_calendar'})
+        open_positions = self.agents['risk_manager'].portfolio_manager.get_positions()
+        research_result = self.agents['researcher'].execute(ufo_data, economic_events)
+
+        diversification_config = {
+            'min_positions_for_session': self.ufo_engine.min_positions_for_session,
+            'target_positions_when_available': self.ufo_engine.target_positions_when_available,
+            'max_concurrent_positions': self.ufo_engine.max_concurrent_positions
+        }
+
+        trade_decision_str = self.agents['trader'].execute(
+            research_result['consensus'], open_positions, diversification_config=diversification_config
+        )
+        risk_assessment = self.agents['risk_manager'].execute(trade_decision_str)
+        authorization = self.agents['fund_manager'].execute(trade_decision_str, risk_assessment)
+
+        # 4. Output and Execution
+        position_count = len(open_positions) if open_positions is not None and not open_positions.empty else 0
+        print("\n--- Main Cycle Decisions ---")
+        print(f"Timestamp: {pd.Timestamp.now()}")
+        print(f"Diversification: {position_count}/{self.ufo_engine.max_concurrent_positions}")
+        print(f"Research: {research_result['consensus']}")
+        print(f"Decision: {trade_decision_str}")
+        print(f"Risk: {risk_assessment}")
+        print(f"Authorization: {authorization}")
+
+        should_execute = "APPROVE" in authorization.upper()
+        if should_execute:
+            account_info = self.mt5_collector.connect() and mt5.account_info()
+            should_trade, trade_reason = self.ufo_engine.should_open_new_trades(
+                current_positions=open_positions,
+                portfolio_status={'balance': account_info.balance, 'equity': account_info.equity} if account_info else None,
+                ufo_data=ufo_data
+            )
+
+            if not should_trade:
+                print(f"UFO Engine blocked new trades: {trade_reason}")
+            else:
+                print(f"🎯 UFO Engine approved new trades: {trade_reason}")
+                self._execute_trades_from_decision(trade_decision_str, ufo_data, symbol_suffix)
+
+        return ufo_data # Return data for the monitoring loop
+
+    def _execute_trades_from_decision(self, trade_decision_str, ufo_data, symbol_suffix):
+        """Helper to parse and execute trades from an LLM decision string."""
+        try:
+            json_match = re.search(r'{.*}', trade_decision_str, re.DOTALL)
+            if not json_match:
+                print("No JSON object found in the LLM decision.")
+                return
+
+            json_str = re.sub(r'//.*?\n', '\n', json_match.group(0))
+            json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+            parsed_data = json.loads(json_str)
+
+            actions_list = parsed_data.get('actions', parsed_data.get('trade_plan', parsed_data.get('trades', [])))
+            if 'trades' in parsed_data and 'actions' not in parsed_data: # Convert format if needed
+                actions_list = [
+                    {'action': 'new_trade', 'currency_pair': t['currency_pair'], 'direction': t.get('direction', 'BUY').upper(), 'volume': t.get('lot_size', 0.1)}
+                    for t in actions_list
+                ]
+
+            print("Executing trades with simulator logic (validation, optimal price, raw volume)...")
+            for action in actions_list:
+                if action.get('action') == 'new_trade':
+                    symbol = action.get('symbol') or action.get('currency_pair', '')
+                    direction = action.get('direction', '').upper()
+                    volume = action.get('volume') or action.get('lot_size', 0.1)
+
+                    base_symbol = symbol.replace("/", "")
+                    corrected_symbol, was_inverted = self.validate_and_correct_currency_pair(base_symbol)
+
+                    if corrected_symbol is None: continue
+
+                    if was_inverted:
+                        direction = 'SELL' if direction == 'BUY' else 'BUY'
+                        print(f"⚠️ Direction inverted to {direction} due to pair correction.")
+
+                    full_symbol = corrected_symbol + symbol_suffix
+                    trade_type = mt5.ORDER_TYPE_BUY if direction == 'BUY' else mt5.ORDER_TYPE_SELL
+                    optimal_price = self.calculate_ufo_entry_price(full_symbol, direction, ufo_data)
+                    
+                    if optimal_price is None:
+                        print(f"⚠️ Could not calculate optimal entry price for {full_symbol}. Skipping trade.")
+                        continue
+
+                    final_volume = max(0.01, volume)
+                    print(f"📊 Executing trade: {full_symbol} {direction} {final_volume} lots @ optimal price {optimal_price:.5f}")
+                    self.trade_executor.execute_trade(
+                        symbol=full_symbol, trade_type=trade_type, volume=final_volume, price=optimal_price,
+                        comment=action.get('comment', 'UFO Sim-Style Trade')
+                    )
+
+                elif action.get('action') == 'close_trade':
+                    print(f"Closing trade by LLM request: {action.get('trade_id')}")
+                    self.trade_executor.close_trade(action['trade_id'])
+
+        except Exception as e:
+            print(f"Error during UFO trade execution: {e}")
+
     def run(self):
         """
-        Runs the live trading loop with UFO methodology.
+        Runs the live trading loop with a two-level structure to clone the simulator's behavior.
+        - Outer loop: Runs the main analysis and new trade decisions every `cycle_period_minutes`.
+        - Inner loop: Runs continuous monitoring every `position_update_frequency_seconds`.
         """
+        last_main_cycle_time = 0
+        last_monitoring_time = 0
+        ufo_data_from_last_cycle = None
+
         while True:
             try:
-                # 1. Check if we're in an active trading session
+                now = time.time()
+
+                # --- Active Session Check ---
                 if not self.ufo_engine.is_active_session():
-                    print(f"Outside active trading session. Waiting 5 minutes...")
-                    time.sleep(300)
-                    continue
-
-                # 2. Data Collection (Simulator Style: All Symbols)
-                print("📊 PHASE 1: Data Collection (Simulator Style)")
-                symbols = self.config['trading']['symbols'].split(',')
-                symbol_suffix = self.config['mt5'].get('symbol_suffix', '')
-                all_price_data = {}
-                timeframes = [mt5.TIMEFRAME_M5, mt5.TIMEFRAME_M15, mt5.TIMEFRAME_H1, mt5.TIMEFRAME_H4, mt5.TIMEFRAME_D1]
-                timeframe_bars = {
-                    mt5.TIMEFRAME_M5: 240, mt5.TIMEFRAME_M15: 80, mt5.TIMEFRAME_H1: 20,
-                    mt5.TIMEFRAME_H4: 120, mt5.TIMEFRAME_D1: 100
-                }
-
-                for symbol in symbols:
-                    symbol_with_suffix = symbol + symbol_suffix
-                    data = self.agents['data_analyst'].execute({
-                        'source': 'mt5', 'symbol': symbol_with_suffix,
-                        'timeframes': timeframes, 'num_bars': timeframe_bars
-                    })
-                    if data:
-                        all_price_data[symbol] = data
-
-                if not all_price_data:
-                    print("Could not fetch any price data. Retrying in 60 seconds...")
+                    print(f"Outside active trading session. Waiting 1 minute...")
                     time.sleep(60)
                     continue
-                print(f"✅ Collected data for {len(all_price_data)} symbols")
 
-                # 3. UFO Calculation (Simulator Style: Reshaped Data)
-                print("🛸 PHASE 2: UFO Analysis (Simulator Style)")
-                reshaped_data = {}
-                for symbol, timeframe_data in all_price_data.items():
-                    for timeframe, df in timeframe_data.items():
-                        if timeframe not in reshaped_data:
-                            reshaped_data[timeframe] = pd.DataFrame()
-                        reshaped_data[timeframe][symbol] = df['close']
+                # --- Portfolio and Session End Checks (High Priority) ---
+                # These checks run frequently to react quickly to major events.
+                if now - last_monitoring_time > 60: # Check every minute
+                    account_info = self.mt5_collector.connect() and mt5.account_info()
+                    if account_info:
+                        stop_breached, stop_reason = self.ufo_engine.check_portfolio_equity_stop(account_info.balance, account_info.equity)
+                        if stop_breached:
+                            print(f"🚨 UFO PORTFOLIO STOP TRIGGERED: {stop_reason}")
+                            self.trade_executor.close_all_positions()
+                            print("🚨 All positions closed. Waiting 5 minutes...")
+                            time.sleep(300)
+                            continue
 
-                incremental_sums_dict = {}
-                for timeframe, price_df in reshaped_data.items():
-                    variation_data = self.ufo_calculator.calculate_percentage_variation(price_df)
-                    incremental_sums_dict[timeframe] = self.ufo_calculator.calculate_incremental_sum(variation_data)
-
-                ufo_data = self.ufo_calculator.generate_ufo_data(incremental_sums_dict)
-                print("✅ UFO analysis completed.")
-
-                # 4. First Priority: Portfolio Management (Simulator Style)
-                self._manage_open_positions_simulator_style()
-
-                # In the simulator, the portfolio check happens after management
-                account_info = self.mt5_collector.connect() and mt5.account_info()
-                if account_info:
-                    portfolio_stop_breached, stop_reason = self.ufo_engine.check_portfolio_equity_stop(
-                        account_info.balance, account_info.equity
-                    )
-                    if portfolio_stop_breached:
-                        print(f"🚨 UFO PORTFOLIO STOP TRIGGERED: {stop_reason}")
-                        print("🚨 Closing ALL positions now!")
-                        open_positions = self.agents['risk_manager'].portfolio_manager.get_positions()
-                        if open_positions is not None and not open_positions.empty:
-                            for _, position in open_positions.iterrows():
-                                self.trade_executor.close_trade(position.ticket)
-                        print("🚨 All positions closed due to portfolio stop. Waiting 5 minutes...")
+                    economic_events = self.agents['data_analyst'].execute({'source': 'economic_calendar'})
+                    should_close, close_reason = self.ufo_engine.should_close_for_session_end(economic_events)
+                    if should_close:
+                        print(f"🌅 UFO SESSION END TRIGGERED: {close_reason}")
+                        self.trade_executor.close_all_positions()
+                        print("All positions closed. Waiting 5 minutes...")
                         time.sleep(300)
                         continue
 
-                # 5. Check for Session End / High-Impact News (Simulator Style)
-                economic_events = self.agents['data_analyst'].execute({'source': 'economic_calendar'})
-                should_close, close_reason = self.ufo_engine.should_close_for_session_end(economic_events)
-                if should_close:
-                    print(f"🌅 UFO SESSION END TRIGGERED: {close_reason}")
-                    print("🌅 Closing all positions for session end or high-impact news.")
-                    open_positions = self.agents['risk_manager'].portfolio_manager.get_positions()
-                    if open_positions is not None and not open_positions.empty:
-                        for _, position in open_positions.iterrows():
-                            self.trade_executor.close_trade(position.ticket)
-                    print("All positions closed. Waiting 5 minutes...")
-                    time.sleep(300)
-                    continue
+                # --- Inner Loop: Continuous Monitoring ---
+                if now - last_monitoring_time >= self.position_update_frequency_seconds:
+                    self._run_continuous_monitoring(ufo_data_from_last_cycle)
+                    last_monitoring_time = now
 
-                # 6. Dynamic Reinforcement (Simulator Style)
-                self._perform_dynamic_reinforcement(ufo_data)
-
-                # 7. Agentic Workflow for new trade decisions
-                economic_events = self.agents['data_analyst'].execute({'source': 'economic_calendar'})
+                # --- Outer Loop: Main Trading Cycle ---
+                if now - last_main_cycle_time >= self.cycle_period_seconds:
+                    cycle_ufo_data = self._run_main_trading_cycle()
+                    if cycle_ufo_data is not None:
+                        ufo_data_from_last_cycle = cycle_ufo_data
+                    last_main_cycle_time = now
                 
-                # Get current open positions after management
-                try:
-                    open_positions = self.agents['risk_manager'].portfolio_manager.get_positions()
-                except:
-                    open_positions = None
-                    
-                research_result = self.agents['researcher'].execute(ufo_data, economic_events)
-                
-                # Pass diversification config to TraderAgent
-                diversification_config = {
-                    'min_positions_for_session': self.ufo_engine.min_positions_for_session,
-                    'target_positions_when_available': self.ufo_engine.target_positions_when_available,
-                    'max_concurrent_positions': self.ufo_engine.max_concurrent_positions
-                }
-                
-                trade_decision_str = self.agents['trader'].execute(
-                    research_result['consensus'], 
-                    open_positions,
-                    diversification_config=diversification_config
-                )
+                # Sleep briefly to prevent high CPU usage
+                time.sleep(10)
 
-                risk_assessment = self.agents['risk_manager'].execute(trade_decision_str)
-
-                if risk_assessment['portfolio_risk_status'] == "STOP_LOSS_BREACHED":
-                    print("!!! EQUITY STOP LOSS BREACHED. CEASING ALL TRADING. !!!")
-                    break
-
-                authorization = self.agents['fund_manager'].execute(trade_decision_str, risk_assessment)
-
-                # 6. Output with Diversification Status
-                position_count = len(open_positions) if open_positions is not None and hasattr(open_positions, '__len__') else 0
-                diversification_status = f"📊 Portfolio Diversification: {position_count}/{self.ufo_engine.max_concurrent_positions} positions"
-                
-                if position_count < self.ufo_engine.min_positions_for_session:
-                    diversification_status += " ⚠️ Below minimum"
-                elif position_count >= self.ufo_engine.target_positions_when_available:
-                    diversification_status += " ✅ Well diversified"
-                else:
-                    diversification_status += " 📈 Building diversification"
-                
-                print("\n--- Live Trading Cycle ---")
-                print(f"Timestamp: {pd.Timestamp.now()}")
-                print(diversification_status)
-                print(f"Research Consensus: {research_result['consensus']}")
-                print(f"Trade Decision: {trade_decision_str}")
-                print(f"Risk Assessment: {risk_assessment}")
-                print(f"Final Authorization: {authorization}")
-
-                # 7. UFO-based Trade Execution (only if conditions are met)
-                should_execute = "APPROVE" in authorization.upper()
-                
-                # If Fund Manager rejected due to high risk, check if we can auto-scale
-                if not should_execute and "REJECT" in authorization.upper():
-                    if "risk" in authorization.lower() and "exceed" in authorization.lower():
-                        print("🔄 Fund Manager rejected due to high risk - will auto-scale and execute anyway")
-                        should_execute = True
-                
-                if should_execute:
-                    # Enhanced UFO engine check with diversification parameters
-                    should_trade, trade_reason = self.ufo_engine.should_open_new_trades(
-                        current_positions=open_positions, 
-                        portfolio_status={'balance': account_info.balance, 'equity': account_info.equity} if account_info else None,
-                        ufo_data=ufo_data
-                    )
-                    
-                    if not should_trade:
-                        print(f"UFO Engine: {trade_reason}")
-                    else:
-                        print(f"🎯 UFO Engine: {trade_reason}")
-                        try:
-                            json_match = re.search(r'{.*}', trade_decision_str, re.DOTALL)
-                            if not json_match:
-                                print("No JSON object found in the LLM decision.")
-                            else:
-                                # Clean JSON by removing JavaScript-style comments
-                                json_str = json_match.group(0)
-                                # Remove single-line comments (// ...)
-                                json_str = re.sub(r'//.*?\n', '\n', json_str)
-                                # Remove trailing commas before closing brackets
-                                json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
-                                
-                                parsed_data = json.loads(json_str)
-                                print(f"Parsed trade data: {parsed_data}")
-                                
-                                # Handle different JSON formats from LLM
-                                actions_list = []
-                                if 'actions' in parsed_data:
-                                    actions_list = parsed_data['actions']
-                                elif 'trade_plan' in parsed_data:
-                                    # Handle trade_plan format (already contains actions)
-                                    actions_list = parsed_data['trade_plan']
-                                elif 'trades' in parsed_data:
-                                    # Convert simple trades format to actions format
-                                    for trade in parsed_data['trades']:
-                                        actions_list.append({
-                                            'action': 'new_trade',
-                                            'currency_pair': trade['currency_pair'],
-                                            'direction': trade['direction'].upper(),
-                                            'volume': 0.1,  # Default volume
-                                            'symbol': trade['currency_pair']
-                                        })
-                                
-                                # --- START OF SIMULATOR-STYLE TRADE EXECUTION ---
-                                # This block replicates the execution logic from the simulator.
-                                # Key differences from the original live system:
-                                # 1. Pair Validation: Applies robust validation and correction for currency pairs.
-                                # 2. Optimal Price: Calculates an entry price based on UFO analysis, not just market price.
-                                # 3. NO RISK SCALING: Executes trades with raw volume from the LLM. This is a high-risk change.
-                                print("Executing trades with simulator logic (validation, optimal price, raw volume)...")
-                                for action in actions_list:
-                                    if action.get('action') == 'new_trade':
-                                        symbol = action.get('symbol') or action.get('currency_pair', '')
-                                        direction = action.get('direction', '').upper()
-                                        volume = action.get('volume') or action.get('lot_size', 0.1)
-                                        
-                                        # 1. Validate and correct currency pair
-                                        base_symbol = symbol.replace("/", "")
-                                        corrected_symbol, was_inverted = self.validate_and_correct_currency_pair(base_symbol)
-                                        
-                                        if corrected_symbol is None:
-                                            print(f"⚠️ Skipping invalid or uncorrectable currency pair: {symbol}")
-                                            continue
-                                        
-                                        # 2. Invert direction if pair was inverted
-                                        if was_inverted:
-                                            direction = 'SELL' if direction == 'BUY' else 'BUY'
-                                            print(f"⚠️ Direction inverted to {direction} due to pair correction.")
-
-                                        # Add suffix for broker
-                                        full_symbol = corrected_symbol + symbol_suffix
-                                        
-                                        # 3. Convert direction to MT5 type
-                                        trade_type = mt5.ORDER_TYPE_BUY if direction == 'BUY' else mt5.ORDER_TYPE_SELL
-
-                                        # 4. Calculate optimal entry price
-                                        optimal_price = self.calculate_ufo_entry_price(full_symbol, direction, ufo_data)
-                                        if optimal_price is None:
-                                            print(f"⚠️ Could not calculate optimal entry price for {full_symbol}. Skipping trade.")
-                                            continue
-                                        
-                                        # 5. [HIGH-RISK] Execute with raw volume, no scaling
-                                        final_volume = max(0.01, volume) # Ensure minimum lot size
-                                        print(f"📊 Executing trade: {full_symbol} {direction} {final_volume} lots @ optimal price {optimal_price:.5f}")
-
-                                        success = self.trade_executor.execute_trade(
-                                            symbol=full_symbol,
-                                            trade_type=trade_type,
-                                            volume=final_volume,
-                                            price=optimal_price,
-                                            comment=action.get('comment', 'UFO Sim-Style Trade')
-                                        )
-
-                                        if success:
-                                            print(f"✅ Simulator-Style Trade executed: {full_symbol} {direction} {final_volume} lots")
-                                        else:
-                                            print(f"❌ Failed to execute: {full_symbol} {direction}")
-
-                                    elif action.get('action') == 'close_trade':
-                                        print(f"Closing trade by LLM request: {action.get('trade_id')}")
-                                        self.trade_executor.close_trade(action['trade_id'])
-
-                        except Exception as e:
-                            print(f"Error during UFO trade execution: {e}")
-
-                print(f"\nWaiting for the next trading cycle ({self.cycle_period_minutes} minutes)...")
-                time.sleep(self.cycle_period_seconds)  # Uses the configured cycle period
-                
             except KeyboardInterrupt:
                 print("\nTrading interrupted by user. Exiting...")
+                self.mt5_collector.disconnect()
                 break
             except Exception as e:
-                print(f"Error in trading cycle: {e}")
+                print(f"❌❌❌ An unexpected error occurred in the main loop: {e}")
+                import traceback
+                traceback.print_exc()
                 print("Waiting 60 seconds before retrying...")
                 time.sleep(60)
 
