@@ -35,6 +35,10 @@ class LiveTrader:
                 except ValueError:
                     return default
             return value
+
+        # --- Simulator-style config parsing ---
+        portfolio_stop_raw = self.config['trading'].get('portfolio_equity_stop', '-7.0')
+        self.portfolio_equity_stop = parse_config_value(portfolio_stop_raw, -7.0)
         
         # Read cycle period from config (default 40 minutes if not specified)
         cycle_period_raw = config['trading'].get('cycle_period_minutes', '40')
@@ -56,6 +60,22 @@ class LiveTrader:
             path=config['mt5']['path']
         )
 
+        # --- Simulator-style Initial Balance ---
+        self.initial_balance = 0.0
+        try:
+            if self.mt5_collector.connect():
+                account_info = mt5.account_info()
+                if account_info:
+                    self.initial_balance = account_info.balance
+                    print(f"✅ Initial balance set to: ${self.initial_balance:,.2f}")
+                else:
+                    print("⚠️ Could not retrieve account info to set initial balance.")
+            else:
+                print("⚠️ MT5 connection failed, could not set initial balance.")
+        except Exception as e:
+            print(f"❌ Error setting initial balance: {e}")
+
+
         self.trade_executor = TradeExecutor(self.mt5_collector, self.config)
         self.ufo_engine = UFOTradingEngine(config)
 
@@ -74,6 +94,23 @@ class LiveTrader:
         self.dynamic_reinforcement_engine = DynamicReinforcementEngine(config)
         self.dynamic_reinforcement_engine.enabled = True
         print("✅ Dynamic Reinforcement Engine force-enabled for simulator-style execution.")
+
+        # For UFO exit signal logic
+        self.previous_ufo_data = None
+
+    def check_portfolio_equity_stop_simulator_style(self, current_equity):
+        """
+        Check if portfolio-level stop loss is breached, using the simulator's logic.
+        """
+        if self.initial_balance <= 0:
+            return False, "Invalid initial balance for drawdown calculation"
+
+        current_drawdown = ((current_equity - self.initial_balance) / self.initial_balance) * 100
+
+        if current_drawdown <= self.portfolio_equity_stop:
+            return True, f"Portfolio stop breached: {current_drawdown:.2f}% (limit: {self.portfolio_equity_stop}%)"
+
+        return False, f"Portfolio healthy: {current_drawdown:.2f}% drawdown"
 
     def validate_and_correct_currency_pair(self, pair):
         """
@@ -164,6 +201,105 @@ class LiveTrader:
 
         # Most other forex pairs use 10000 multiplier (pip = 0.0001)
         return 10000
+
+    def _log_enhanced_analysis(self, oscillation_analysis, uncertainty_metrics, coherence_analysis):
+        """Log enhanced UFO analysis results, from simulator."""
+        try:
+            # Log market state summary across timeframes
+            for timeframe, metrics in uncertainty_metrics.items():
+                overall_state = metrics.get('overall_state', 'unknown')
+                confidence = metrics.get('confidence_level', 'unknown')
+                scaling = metrics.get('recommended_position_scaling', 1.0)
+
+                print(f"🔍 {timeframe}: {overall_state} (confidence: {confidence}, scaling: {scaling:.2f})")
+
+            # Log coherence insights
+            strong_coherence_count = sum(1 for curr_data in coherence_analysis.values()
+                                       if curr_data.get('coherence_level') == 'strong')
+            total_currencies = len(coherence_analysis)
+
+            if total_currencies > 0:
+                coherence_ratio = strong_coherence_count / total_currencies
+                print(f"📊 Timeframe Coherence: {strong_coherence_count}/{total_currencies} currencies show strong coherence ({coherence_ratio:.1%})")
+
+        except Exception as e:
+            print(f"⚠️ Error logging enhanced analysis: {e}")
+
+    def analyze_ufo_exit_signals(self, current_ufo_data, previous_ufo_data):
+        """Analyze UFO data for exit signals based on currency strength changes, from simulator."""
+        exit_signals = []
+
+        if previous_ufo_data is None:
+            return exit_signals
+
+        # Extract raw UFO data from enhanced structure
+        current_raw_data = current_ufo_data.get('raw_data', {})
+        previous_raw_data = previous_ufo_data.get('raw_data', {})
+
+        # Check for currency strength reversals across timeframes
+        for timeframe in current_raw_data.keys():
+            if timeframe not in previous_raw_data:
+                continue
+
+            current_strengths = current_raw_data[timeframe]
+            previous_strengths = previous_raw_data[timeframe]
+
+            currency_list = list(current_strengths.keys())
+
+            # Detect significant strength changes
+            for currency in currency_list:
+                if currency not in previous_strengths:
+                    continue
+
+                current_strength = current_strengths[currency][-1]
+                # Use last 5 values for a more stable average
+                previous_strength_values = previous_strengths[currency][-5:]
+                if not previous_strength_values: continue
+                avg_previous = sum(previous_strength_values) / len(previous_strength_values)
+
+                # Signal strength reversal (threshold can be tuned)
+                if abs(current_strength - avg_previous) > 2.5:  # Significant change threshold
+                    direction_change = "strengthening" if current_strength > avg_previous else "weakening"
+                    exit_signals.append({
+                        'currency': currency,
+                        'timeframe': timeframe,
+                        'change': current_strength - avg_previous,
+                        'reason': f"{currency} now significantly {direction_change} on {timeframe}"
+                    })
+
+        return exit_signals
+
+    def close_affected_positions(self, exit_signals):
+        """Close positions affected by strong exit signals, adapted for live trading."""
+        positions_closed = 0
+        if not exit_signals:
+            return positions_closed
+
+        print("🚨 UFO Exit Signals detected. Checking for positions to close.")
+        currencies_to_close = {signal['currency'] for signal in exit_signals}
+
+        open_positions = self.agents['risk_manager'].portfolio_manager.get_positions()
+        if open_positions is None or open_positions.empty:
+            return positions_closed
+
+        suffix = self.config['mt5'].get('symbol_suffix', '')
+
+        for _, position in open_positions.iterrows():
+            symbol = position.symbol.replace(suffix, '')
+
+            if len(symbol) >= 6:
+                base_currency = symbol[:3]
+                quote_currency = symbol[3:6]
+
+                if base_currency in currencies_to_close or quote_currency in currencies_to_close:
+                    print(f"🎯 Closing {position.symbol} ({position.ticket}) due to exit signal for {base_currency} or {quote_currency}.")
+                    self.trade_executor.close_trade(position.ticket)
+                    positions_closed += 1
+
+        if positions_closed > 0:
+            print(f"✅ Closed {positions_closed} positions based on UFO exit signals.")
+
+        return positions_closed
 
     def _manage_open_positions_simulator_style(self):
         """
@@ -363,13 +499,35 @@ class LiveTrader:
             incremental_sums_dict[timeframe] = self.ufo_calculator.calculate_incremental_sum(variation_data)
 
         ufo_data = self.ufo_calculator.generate_ufo_data(incremental_sums_dict)
-        print("✅ UFO analysis completed.")
+
+        # --- Enhanced UFO Analysis (from simulator) ---
+        print("🛸 PHASE 2.5: Enhanced UFO Analysis")
+        oscillation_analysis = self.ufo_calculator.detect_oscillations(ufo_data)
+        uncertainty_metrics = self.ufo_calculator.analyze_market_uncertainty(ufo_data, oscillation_analysis)
+        coherence_analysis = self.ufo_calculator.detect_timeframe_coherence(ufo_data)
+
+        enhanced_ufo_data = {
+            'raw_data': ufo_data,
+            'oscillation_analysis': oscillation_analysis,
+            'uncertainty_metrics': uncertainty_metrics,
+            'coherence_analysis': coherence_analysis
+        }
+        self._log_enhanced_analysis(oscillation_analysis, uncertainty_metrics, coherence_analysis)
+        print("✅ Enhanced UFO analysis completed.")
+
+        # 2.7. UFO Exit Signal Analysis
+        if self.previous_ufo_data:
+            exit_signals = self.analyze_ufo_exit_signals(enhanced_ufo_data, self.previous_ufo_data)
+            if exit_signals:
+                for signal in exit_signals:
+                    print(f"⚠️ UFO Exit Signal: {signal['reason']} (change: {signal['change']:.2f})")
+                self.close_affected_positions(exit_signals)
 
         # 3. Agentic Workflow for new trade decisions
         print("🤖 PHASE 3: Agentic Workflow")
         economic_events = self.agents['data_analyst'].execute({'source': 'economic_calendar'})
-        open_positions = self.agents['risk_manager'].portfolio_manager.get_positions()
-        research_result = self.agents['researcher'].execute(ufo_data, economic_events)
+        open_positions = self.agents['risk_manager'].portfolio_manager.get_positions() # Re-fetch after potential closures
+        research_result = self.agents['researcher'].execute(enhanced_ufo_data, economic_events)
 
         diversification_config = {
             'min_positions_for_session': self.ufo_engine.min_positions_for_session,
@@ -399,16 +557,19 @@ class LiveTrader:
             should_trade, trade_reason = self.ufo_engine.should_open_new_trades(
                 current_positions=open_positions,
                 portfolio_status={'balance': account_info.balance, 'equity': account_info.equity} if account_info else None,
-                ufo_data=ufo_data
+                ufo_data=enhanced_ufo_data
             )
 
             if not should_trade:
                 print(f"UFO Engine blocked new trades: {trade_reason}")
             else:
                 print(f"🎯 UFO Engine approved new trades: {trade_reason}")
-                self._execute_trades_from_decision(trade_decision_str, ufo_data, symbol_suffix)
+                self._execute_trades_from_decision(trade_decision_str, enhanced_ufo_data, symbol_suffix)
 
-        return ufo_data # Return data for the monitoring loop
+        # Save the current data for the next cycle's comparison
+        self.previous_ufo_data = enhanced_ufo_data
+
+        return enhanced_ufo_data # Return data for the monitoring loop
 
     def _execute_trades_from_decision(self, trade_decision_str, ufo_data, symbol_suffix):
         """Helper to parse and execute trades from an LLM decision string."""
@@ -492,9 +653,10 @@ class LiveTrader:
                 if now - last_monitoring_time > 60: # Check every minute
                     account_info = self.mt5_collector.connect() and mt5.account_info()
                     if account_info:
-                        stop_breached, stop_reason = self.ufo_engine.check_portfolio_equity_stop(account_info.balance, account_info.equity)
+                        # Use the new simulator-style portfolio stop check
+                        stop_breached, stop_reason = self.check_portfolio_equity_stop_simulator_style(account_info.equity)
                         if stop_breached:
-                            print(f"🚨 UFO PORTFOLIO STOP TRIGGERED: {stop_reason}")
+                            print(f"🚨 SIMULATOR-STYLE PORTFOLIO STOP TRIGGERED: {stop_reason}")
                             self.trade_executor.close_all_positions()
                             print("🚨 All positions closed. Waiting 5 minutes...")
                             time.sleep(300)
